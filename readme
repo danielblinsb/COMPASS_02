@@ -1,0 +1,164 @@
+COMPASS.UOL - PB - SENAC/UNICESUMAR
+Atividade AWS - Docker
+Implantação de aplicação WordPress com contêiner usando os serviços RDS database Mysql e EFS da AWS
+1. Criar e configurar recursos no serviço VPC:
+VPC
+Name: Dock_WP
+IPv4 CIDR: 172.16.0.0/27 (32 addresses)
+Tags: Padrões
+Habilitar DNS hostnames na VPC
+SUBNETS
+Name: Dock_WP_sub01
+Zona: us-east-1a
+IPv4 CIDR: 172.16.0.0/28 (16 addresses)
+Tags: Padrões
+Name: Dock_WP_sub02
+Zona: us-east-1c
+IPv4 CIDR: 172.16.0.16/28 (16 addresses)
+Tags: Padrões
+INTERNET GATEWAY
+Name: Docker_WP_IGW
+Tags: Padrões
+Anexar à VPC e adicionar rota: 0.0.0.0/0 > igw-xxxxxxxxxxxxxxxxxxx (Dock_WP_IGW)
+2. Recursos no serviço EC2:
+SECURITY GROUPS
+Para as instâncias
+Name: Dock_WP_SG01
+Inbound rules:
+SSH: TCP 22 My IP 191.10.170.137/32
+NFS: TCP 2049 Custom 172.16.0.0/27
+MYSQL/Aurora: TCP 3306 Custom 172.16.0.0/27
+HTTP: TCP 80 Custom 172.16.0.0/27
+HTTP: TCP 80 My IP 191.10.170.137/32
+Para o RDS
+Name: Dock_WP_SG02
+Inbound rules:
+HTTP: TCP 80 Custom 172.16.0.0/27
+MYSQL/Aurora: TCP 3306 Custom 172.16.0.0/27
+NFS: TCP 2049 Custom 172.16.0.0/27
+Para o Load Balancer
+Name: Dock_WP_SG03
+Inbound rules:
+Custom TCP: TCP 8080 Custom 0.0.0.0/0
+3. Criar e configurar instância no serviço RDS:
+Standard create > MySQL > Free tier
+Identificador db: dock-wp
+Username: admin
+Password: Q(!)=r69!_gP3p0
+Type: db.t3.micro
+Associar a VPC
+Associar ao security group SG02
+Tags: Padrões
+4. Criar e configurar serviço EFS:
+Name: Dock_WP_EFS
+Associar a VPC
+Associar pontos de montagem (us-east-1a, us-east-1c) ao security group SG01
+Tags: Padrões
+5. Recursos no serviço EC2:
+Criar e configurar duas instâncias padrões
+Amazon Linux 2023, t2.micro, 8 GiB gp3
+Associar a VPC
+Associar subnet (cada instância numa diferente)
+Associar ao security group SG01
+Tags: Padrões
+Configurar user data com script padrão para iniciar com as instâncias:
+#!/bin/bash
+
+# Update and install Docker
+sudo yum update -y
+sudo yum install docker -y
+
+# Start and enable Docker
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Add ec2-user to the docker group
+sudo usermod -aG docker ec2-user
+
+# Create and mount EFS directory
+sudo mkdir /mnt/efs
+sudo mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport fs-003af7a3cef4bdc49.efs.us-east-1.amazonaws.com:/ /mnt/efs
+
+# Add EFS mount to /etc/fstab for automatic mounting after reboot
+echo "fs-003af7a3cef4bdc49.efs.us-east-1.amazonaws.com:/ /mnt/efs nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" | sudo tee -a /etc/fstab
+
+# Create Dockerfile
+sudo tee Dockerfile > /dev/null <<EOF
+FROM wordpress:latest
+COPY wp-config.php /var/www/html/
+EOF
+
+# Create wp-config.php
+sudo tee wp-config.php > /dev/null <<EOF
+<?php
+define('DB_NAME', 'dock-wp');
+define('DB_USER', 'admin');
+define('DB_PASSWORD', 'Q(!)=r69!_gP3p0');
+define('DB_HOST', 'dock-wp.cdik6o02uxzq.us-east-1.rds.amazonaws.com');
+define('DB_CHARSET', 'utf8');
+define('DB_COLLATE', '');
+\$table_prefix = 'wp_';
+define('WP_DEBUG', false);
+if ( !defined('ABSPATH') )
+    define('ABSPATH', dirname(__FILE__) . '/');
+require_once(ABSPATH . 'wp-settings.php');
+EOF
+
+# Build Docker image
+sudo docker build -t my-wordpress .
+
+# Run Docker container
+sudo docker run -d --restart unless-stopped --name my-wordpress-container -p 8080:80 my-wordpress
+
+# Install MariaDB
+sudo dnf install mariadb105 -y
+
+Criar imagem de uma das instâncias lançadas
+Selecionar instância > actions > image and templates > create image
+Associar a VPC
+Associar ao security group SG01
+Associar a subnet
+No user data
+Tags: Padrões
+Criar launch template
+EC2 > Launch templates > Create launch template
+Name: Dock_WP_template
+Template version description: first to Auto Scaling
+Auto Scaling guidance: Enable
+Tags: Padrões
+OS Images: My AMIs > First
+Instance type: t2.micro
+Associar ao security group SG01
+Tags: Padrões
+Configurar User data com o script padrão
+Criar Target group para o Load Balancer
+Type: Instances
+Name: Dock-WP-TG
+Protocol: HTTP
+Port: 8080
+Associar a VPC
+Health checks: HTTP
+Health check path: /
+Tags: Padrões
+Editar configurações avançadas de Health checks no Success codes com 200,302
+Criar e configurar Load Balancer
+Application Load Balancer
+Name: Dock-WP-ALB
+Associar a VPC
+Marcar as zonas disponíveis (us-east-1a, us-east-1c)
+Associar ao security group SG03
+Listeners: HTTP 8080
+Selecionar o target group
+Tags: Padrões
+Adicionar ao security group SG01 regra para o security group do load balancer:
+Inbound rules:
+HTTP: TCP 8080 Custom Dock_WP_SG03|sg-xxxxxxxxxxxxxxxxxx
+Criar e configurar recurso Auto Scaling
+Name: Dock_WP_AS
+Launch template: Dock_WP_template
+Associar a VPC
+Selecionar as zonas disponíveis (us-east-1a, us-east-1c)
+Anexar ao load balancer
+Group size: 2
+Scaling limits: Min 2, Max 4
+Tags: Padrões
